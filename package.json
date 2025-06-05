@@ -2,9 +2,9 @@
   "name": "chatverse-backend",
   "version": "1.0.0",
   "description": "ChatVerse Real-time Chat Backend",
-  "main": "server.js",
+  "main": "backend/server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node backend/server.js",
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
