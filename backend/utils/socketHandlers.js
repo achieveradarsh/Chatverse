@@ -3,8 +3,9 @@ const Chat = require("../models/chatModel")
 const Message = require("../models/messageModel")
 
 const setupSocketHandlers = (io) => {
-  // Store active users
+  // Store active users and rooms
   const activeUsers = new Map()
+  const roomUsers = new Map() // Track users in each room
 
   io.on("connection", (socket) => {
     console.log(`User connected: ${socket.user._id}`)
@@ -24,19 +25,120 @@ const setupSocketHandlers = (io) => {
     // Join personal room for direct messages
     socket.join(socket.user._id.toString())
 
-    // Handle joining chat rooms
+    // ===== NEW: ROOM-BASED MESSAGING FOR INVITE CODES =====
+
+    // Handle joining room with invite code
+    socket.on("join_room", (data) => {
+      const { roomId, userName } = data
+      console.log(`User ${socket.user._id} (${userName}) joining room: ${roomId}`)
+
+      // Join the socket room
+      socket.join(roomId)
+
+      // Track users in room
+      if (!roomUsers.has(roomId)) {
+        roomUsers.set(roomId, new Set())
+      }
+      roomUsers.get(roomId).add({
+        userId: socket.user._id.toString(),
+        userName: userName,
+        socketId: socket.id,
+      })
+
+      // Notify others in room about new user
+      socket.to(roomId).emit("user_joined_room", {
+        roomId,
+        userId: socket.user._id,
+        userName: userName,
+        message: `${userName} joined the chat`,
+      })
+
+      // Send confirmation to user
+      socket.emit("room_joined", {
+        roomId,
+        success: true,
+        message: `Joined room ${roomId}`,
+        roomUsers: Array.from(roomUsers.get(roomId) || []),
+      })
+
+      console.log(`Room ${roomId} now has ${roomUsers.get(roomId)?.size || 0} users`)
+    })
+
+    // Handle sending message to room
+    socket.on("send_message_to_room", (data) => {
+      const { roomId, message, userName, timestamp } = data
+      console.log(`Message in room ${roomId} from ${userName}: ${message}`)
+
+      const messageData = {
+        id: Date.now().toString(),
+        roomId,
+        message,
+        userName,
+        userId: socket.user._id,
+        timestamp: timestamp || new Date().toISOString(),
+        type: "user",
+      }
+
+      // Send to all users in the room (including sender for confirmation)
+      io.to(roomId).emit("room_message_received", messageData)
+
+      console.log(`Message broadcasted to room ${roomId}`)
+    })
+
+    // Handle typing in room
+    socket.on("room_typing", (data) => {
+      const { roomId, userName, isTyping } = data
+
+      // Send typing indicator to others in room (not sender)
+      socket.to(roomId).emit("room_typing_update", {
+        roomId,
+        userName,
+        userId: socket.user._id,
+        isTyping,
+      })
+    })
+
+    // Handle leaving room
+    socket.on("leave_room", (data) => {
+      const { roomId, userName } = data
+      console.log(`User ${userName} leaving room: ${roomId}`)
+
+      socket.leave(roomId)
+
+      // Remove user from room tracking
+      if (roomUsers.has(roomId)) {
+        const users = roomUsers.get(roomId)
+        users.forEach((user) => {
+          if (user.userId === socket.user._id.toString()) {
+            users.delete(user)
+          }
+        })
+
+        // Notify others in room
+        socket.to(roomId).emit("user_left_room", {
+          roomId,
+          userId: socket.user._id,
+          userName: userName,
+          message: `${userName} left the chat`,
+        })
+      }
+    })
+
+    // ===== EXISTING CHAT FUNCTIONALITY =====
+
+    // Handle joining chat rooms (existing functionality)
     socket.on("join chat", (chatId) => {
       socket.join(chatId)
       console.log(`User ${socket.user._id} joined chat: ${chatId}`)
     })
 
-    // Handle leaving chat rooms
+    // Handle leaving chat rooms (existing functionality)
     socket.on("leave chat", (chatId) => {
       socket.leave(chatId)
       console.log(`User ${socket.user._id} left chat: ${chatId}`)
     })
 
-    // Handle new message
+    // Handle new message (existing functionality)
     socket.on("new message", async (messageData) => {
       try {
         const { chatId, content } = messageData
@@ -81,7 +183,7 @@ const setupSocketHandlers = (io) => {
       }
     })
 
-    // Handle typing indicator
+    // Handle typing indicator (existing functionality)
     socket.on("typing", (chatId) => {
       socket.to(chatId).emit("typing", {
         chatId,
@@ -89,7 +191,7 @@ const setupSocketHandlers = (io) => {
       })
     })
 
-    // Handle stop typing
+    // Handle stop typing (existing functionality)
     socket.on("stop typing", (chatId) => {
       socket.to(chatId).emit("stop typing", {
         chatId,
@@ -97,7 +199,7 @@ const setupSocketHandlers = (io) => {
       })
     })
 
-    // Handle message delivery status
+    // Handle message delivery status (existing functionality)
     socket.on("message delivered", async ({ messageId }) => {
       try {
         await Message.findByIdAndUpdate(messageId, { $addToSet: { deliveredTo: socket.user._id } }, { new: true })
@@ -121,7 +223,7 @@ const setupSocketHandlers = (io) => {
       }
     })
 
-    // Handle message read status
+    // Handle message read status (existing functionality)
     socket.on("message read", async ({ messageId }) => {
       try {
         await Message.findByIdAndUpdate(
@@ -160,6 +262,22 @@ const setupSocketHandlers = (io) => {
 
       // Remove user from active users
       activeUsers.delete(socket.user._id.toString())
+
+      // Remove user from all rooms
+      roomUsers.forEach((users, roomId) => {
+        users.forEach((user) => {
+          if (user.socketId === socket.id) {
+            users.delete(user)
+            // Notify room about user leaving
+            socket.to(roomId).emit("user_left_room", {
+              roomId,
+              userId: socket.user._id,
+              userName: user.userName,
+              message: `${user.userName} disconnected`,
+            })
+          }
+        })
+      })
 
       // Update user status to offline
       User.findByIdAndUpdate(socket.user._id, { status: "offline", lastSeen: Date.now() }, { new: true }).then(
